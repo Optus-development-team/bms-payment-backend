@@ -1,0 +1,73 @@
+loginscreen:
+imageLogin_id=LogoInicialEconet
+inputUsuario_id=usuario
+inputPassword_id=password
+buttonLogin_id=btn_ingresar
+
+
+verificarScreen:
+inputClave_id=txtClaveTrans
+button_text=Continuar
+
+
+modalScreen:
+modal_id=modalMensaje
+button_aceptar_text=Aceptar
+
+homeScreen:
+textSaldo_id=Saldo
+buttonQR_text=Simple QR
+buttonQRgenerar_id=btn_gotoGenerarQR
+
+generarQRscreen:
+sectionOrigin_id=Cuenta_Origen
+sectionDestiny_id=Cuenta_Destino
+qrTitle_text=Datos para QR
+inputGlosa_id=glosa
+inputMonto_id=monto
+checkboxUsoUnico_id=pagoUnico
+generarQR_id=GenerarQR
+
+
+qrImage:
+imageQR_id=imgQR
+textDownload_text=Descargar QR
+downloadFieldQR=QR.png
+
+movimientos:
+buttonMov1_data-id=mov-1
+comprobanteModal_id=cotenidoComprobante
+glosaRow_text=Glosa
+
+id=txtClaveTrans
+qrText='Simple QR'
+
+
+LoginFlow:
+Press onto the element with the inputUsuario_id id and write the ECONET_USER into the input
+Press onto the element with the inputPassword_id id and write the ECONET_PASS into the input
+Press onto the element with the buttonLogin_id id 
+
+Wait until the page is finish charging
+
+If the element with inputClave_id id is visible and the 2FACODE environment variable is empty then return an soecific error 
+if the 2FACODE is not empty then write the 2FACODE into the element with id inputClave_id and next press the button with text button_text
+
+Wait until the page is finish charging, if the element with id modal_id is visible then press the element with text button_aceptar_text
+
+
+GenerarQR flow
+navigate to the "https://econet.bancoecofuturo.com.bo:447/EconetWeb/Inicio/Index" url and verify that the element imageLogin_id is not visible, otherwhise run the login flow
+after that go to the "https://econet.bancoecofuturo.com.bo:447/EconetWeb/Transferencia/QRGenerar" url and verify that the elements sectionOrigin_id and sectionDestiny_id are visible
+write the "details" string into the "inputGlosa_id" field and the "amount" number into the inputMonto_id field
+then press the checkbox with id "checkboxUsoUnico_id" and press into the button "generarQR_id"
+wait 5 seconds
+then press the button with the atribute download="QR.png" and the text textDownload_text, this will save the QR image in png format 
+
+Comprobar pago
+navigate to the "https://econet.bancoecofuturo.com.bo:447/EconetWeb/Inicio/Index" url and verify that the element imageLogin_id is not visible, otherwhise run the login flow 
+once in the index page press the element with the atribute "data-id" equal to "buttonMov1_data-id"
+verify inside the "comprobanteModal_id" below the row "Glosa" and <td> element
+the string inside this <td> element must contain the "BM QR" string, if thats correct, then verify that the string also contains the "details" string inside
+if everything is correct then consider the payment as successfull
+
