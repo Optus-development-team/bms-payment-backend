@@ -3,14 +3,10 @@
   "framework": null,
   "functions": {
     "api/*.ts": {
-      "runtime": "nodejs20.x",
       "memory": 2048,
-      "maxDuration": 120,
-      "includeFiles": "dist/**"
+      "maxDuration": 120
     }
   },
-  "buildCommand": "npm run vercel-build",
-  "installCommand": "npm install",
   "routes": [
     { "src": "/docs(.*)", "dest": "/api/index.ts" },
     { "src": "/v1/(.*)", "dest": "/api/index.ts" },
