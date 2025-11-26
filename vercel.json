@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": "",
   "framework": null,
   "functions": {
     "api/index.ts": {
