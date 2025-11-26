@@ -1,0 +1,68 @@
+{
+  "info": {
+    "name": "BMS Payment Backend - Fiat Automation",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Collection for testing the NestJS fiat automation endpoints."
+  },
+  "item": [
+    {
+      "name": "Generate QR",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/v1/fiat/generate-qr",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "fiat", "generate-qr"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"ORDER-123456\",\n  \"amount\": 150.75,\n  \"details\": \"BM QR #INV-1001\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Verify Payment",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/v1/fiat/verify-payment",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "fiat", "verify-payment"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"order_id\": \"ORDER-123456\",\n  \"details\": \"BM QR #INV-1001\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Set 2FA Token",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-internal-api-key", "value": "{{internalApiKey}}" }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/v1/fiat/set-2fa",
+          "host": ["{{baseUrl}}"],
+          "path": ["v1", "fiat", "set-2fa"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"code\": \"123456\"\n}"
+        }
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "internalApiKey", "value": "CHANGE_ME", "type": "string" }
+  ]
+}
