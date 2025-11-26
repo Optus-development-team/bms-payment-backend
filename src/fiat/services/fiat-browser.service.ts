@@ -25,8 +25,8 @@ export class FiatBrowserService implements OnModuleDestroy {
 
   private readonly selectors = {
     loginLogo: '#LogoInicialEconet',
-    userInput: '#usuario',
-    passwordInput: '#password',
+    userInput: 'input#usuario',
+    passwordInput: 'input#password',
     loginButton: '#btn_ingresar',
     twoFaInput: '#txtClaveTrans',
     continueButton: 'button:has-text("Continuar")',
