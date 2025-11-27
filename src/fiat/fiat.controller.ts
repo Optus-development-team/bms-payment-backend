@@ -13,6 +13,7 @@ import {
   ApiAcceptedResponse,
   ApiOperation,
   ApiResponse,
+  ApiSecurity,
   ApiTags,
   ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
@@ -62,6 +63,7 @@ export class FiatController {
   @ApiOperation({
     summary: 'Provide the current 2FA token to unblock automation logins.',
   })
+  @ApiSecurity('internal-api-key')
   @ApiResponse({
     status: 200,
     description: '2FA token stored and ready for use.',

@@ -19,6 +19,14 @@ export const configureApp = (app: INestApplication): void => {
     .setVersion('1.0.0')
     .addTag('Fiat Automation')
     .addServer('http://localhost:3000', 'Local development')
+    .addApiKey(
+      {
+        type: 'apiKey',
+        name: 'x-internal-api-key',
+        in: 'header',
+      },
+      'internal-api-key',
+    )
     .build();
 
   const swaggerDocument = SwaggerModule.createDocument(app, swaggerConfig);
