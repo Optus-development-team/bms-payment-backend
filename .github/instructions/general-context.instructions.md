@@ -1,19 +1,27 @@
 # SYSTEM CONTEXT: BMS_PAYMENT_BACKEND (Automation Worker)
 
 ## 1. System Overview
-- **Role:** NestJS 11 microservice dedicated to Ecofuturo bank automation (QR generation and payment verification). It runs stand-alone so risky browser automation does not impact other services.
+- **Role:** NestJS 11 microservice dedicated to Ecofuturo bank automation (QR generation and payment verification) and x402 cryptocurrency payments on Avalanche Fuji. It runs stand-alone so risky browser automation does not impact other services.
 - **Runtime:** Node 18+, NestJS HTTP server (Express adapter). Vercel serverless handler (`api/index.ts`) reuses the same module/bootstrap logic used locally.
-- **Key Libraries:** `playwright-core` for automation, `@sparticuz/chromium` for serverless Chromium binaries, `axios` for outbound webhooks, `class-validator` + `class-transformer` for DTO coercion, and a custom in-memory `JobQueueService` (no Redis).
-- **Global Config:** `configureApp` enables validation pipes, Swagger UI under `/docs`, and the `x-internal-api-key` security scheme for privileged endpoints.
-- **Statefulness:** `FiatBrowserService` owns a single Playwright browser/context/page. All jobs share it to preserve authenticated cookies and avoid unnecessary logins.
+- **Key Libraries:** `playwright-core` for automation, `@sparticuz/chromium` for serverless Chromium binaries, `axios` for outbound webhooks, `class-validator` + `class-transformer` for DTO coercion, `viem` for blockchain interactions, and custom in-memory `JobQueueService` implementations (no Redis).
+- **Global Config:** `configureApp` enables validation pipes, Swagger UI under `/docs`, and the `x-internal-api-key` and `X-PAYMENT` security schemes for privileged endpoints.
+- **Statefulness:** `FiatBrowserService` owns a single Playwright browser/context/page. `X402PaymentService` maintains in-memory payment jobs. All jobs share these resources to preserve authenticated cookies and payment state.
 
 ## 2. Application Modules
 
 ### 2.1 HTTP/API Layer
-- `AppModule` loads `ConfigModule.forRoot({ isGlobal: true })` plus `FiatModule`.
-- `FiatController` exposes three POST endpoints under `/v1/fiat`:
+- `AppModule` loads `ConfigModule.forRoot({ isGlobal: true })` plus `FiatModule` and `X402Module`.
+- `FiatController` exposes POST endpoints under `/v1/fiat`:
 	- `/generate-qr` and `/verify-payment` accept background jobs (202 Accepted responses) with DTOs that normalize snakeCase/camelCase payloads.
+	- `/generate-hybrid-payment` creates payment jobs supporting both fiat QR and x402 crypto payment methods.
 	- `/set-2fa` stores temporary 2FA tokens and requires the `x-internal-api-key` header to match `INTERNAL_API_KEY`.
+- `X402Controller` exposes endpoints under `/v1/x402`:
+	- `/payment` initiates payments (returns HTTP 402 with payment requirements).
+	- `/payment/:jobId/pay` processes payments with X-PAYMENT header.
+	- `/payment/:jobId/confirm` triggers manual confirmation flow.
+	- `/payment/:jobId/status` and `/order/:orderId/status` return payment status.
+	- `/supported` lists supported networks and tokens.
+	- `/health` checks facilitator wallet balance.
 - `SwaggerModule` documents every route and is reused both locally and on Vercel through `configureApp`.
 
 ### 2.2 Fiat Job Orchestration
@@ -21,7 +29,26 @@
 - `JobQueueService` keeps an in-memory promise chain (`tail: Promise<void>`) to guarantee **exactly one** Playwright job runs at a time. There is no Redis/worker pool; concurrency safety depends on the singleton Nest process (or single Vercel lambda instance).
 - `FiatAutomationService` executes the actual automation work and reports outcomes through `WebhookService`. It wraps failures to detect the `TwoFactorRequiredError` so alerts can be sent upstream.
 
-### 2.3 Playwright Automation (`FiatBrowserService`)
+### 2.3 x402 Payment Module
+- **X402Module** provides cryptocurrency payment processing using the HTTP 402 Payment Required protocol on Avalanche Fuji testnet.
+- **Network Configuration:**
+	- Chain ID: 43113 (Avalanche Fuji Testnet)
+	- RPC: `https://api.avax-test.network/ext/bc/C/rpc`
+	- USDC Token: `0x5425890298aed601595a70AB815c96711a31Bc65` (6 decimals)
+	- Block Explorer: `https://testnet.snowtrace.io`
+- **Services:**
+	- `X402FacilitatorService`: Verifies EIP-712 signatures and settles payments on-chain using EIP-3009 `transferWithAuthorization`. The facilitator pays gas fees.
+	- `X402PaymentService`: Manages payment lifecycle with in-memory job storage. Supports manual confirmation flow before final settlement.
+	- `X402WebhookService`: Sends payment events to `${OPTUSBMS_BACKEND_URL}/webhook/x402/result`.
+	- `X402JobQueueService`: Sequential job processing similar to fiat queue.
+- **Payment Flow:**
+	1. Client requests payment → Server returns HTTP 402 with `X-PAYMENT-REQUIRED` header (JSON payment requirements).
+	2. Client signs EIP-712 authorization and sends `X-PAYMENT` header (base64-encoded payload).
+	3. Facilitator verifies signature and optionally awaits manual confirmation.
+	4. Upon confirmation, facilitator executes `transferWithAuthorization` on-chain.
+	5. Server returns `X-PAYMENT-RESPONSE` header with transaction hash.
+
+### 2.4 Playwright Automation (`FiatBrowserService`)
 - Builds launch options dynamically:
 	- **Local:** `chromium.launch({ headless: true })`.
 	- **Serverless (Vercel/Lambda):** uses `@sparticuz/chromium` args/executable unless `CHROME_EXECUTABLE_PATH` overrides it. Sandbox disabled.
@@ -29,12 +56,12 @@
 - Navigation helpers (`navigate`, `logPageInfo`, `logElementState`, `clickIfVisible`) are heavily logged to aid troubleshooting when running remotely.
 - Saves downloaded QR PNGs to `QR_OUTPUT_DIR` (defaults to `tmp/qr-tests`). Files are persisted best-effort and independently of webhook delivery.
 
-### 2.4 Two-Factor Handling (`TwoFaStoreService`)
+### 2.5 Two-Factor Handling (`TwoFaStoreService`)
 - Small in-memory holder seeded from optional env `2FACODE`.
 - `setCode` updates the current token; `consumeCode` returns the code once and clears it. `hasCode` is used to decide if automation may proceed.
 - Consumption happens during login; if no code is available, `FiatBrowserService` throws `TwoFactorRequiredError` so `FiatAutomationService` can emit a webhook and stop the job cleanly.
 
-### 2.5 Webhook Dispatch (`WebhookService`)
+### 2.6 Webhook Dispatch (`WebhookService`)
 - Posts to `${OPTUSBMS_BACKEND_URL}/webhook/payments/result` using Axios with a 10s timeout.
 - Emits three event types:
 	- `QR_GENERATED` with `{ qr_image_base64 }` payload.
@@ -42,7 +69,7 @@
 	- `LOGIN_2FA_REQUIRED` when automation is blocked waiting for a token.
 - If `OPTUSBMS_BACKEND_URL` is undefined, the service logs a warning and skips the call (no retries/backoff built in).
 
-### 2.6 Serverless Entry Point
+### 2.7 Serverless Entry Point
 - `api/index.ts` caches the initialized Nest adapter so Vercel requests reuse the same in-memory state (including the queued jobs and browser session) while the lambda instance is warm.
 - `vercel.json` routes every path (including `/docs` and `/v1/*`) to that handler, and bumps the function limits to 2 GB / 120 s.
 
@@ -91,7 +118,46 @@
 	- Body: `{ "code": "123456" }` (alphanumeric, 4-12 chars).
 	- Response: `{ "status": "updated", "message": "Retry the job now" }` (HTTP 200). The code is stored in-memory and consumed on the next login attempt.
 
-### 4.2 Outbound (webhooks delivered by this service)
+### 4.2 x402 Payment API (Inbound)
+- `POST /v1/x402/payment`
+	- Body: `{ order_id, amount: number, description?, webhookUrl?, requireManualConfirmation?: boolean }`.
+	- Response: HTTP 402 with headers:
+		- `X-PAYMENT-REQUIRED`: JSON with `{ accepts, maxAmountRequired, resource, description, mimeType, payToAddress, jobId }`.
+	- The `accepts` array contains supported payment schemes (exact-evm).
+
+- `POST /v1/x402/payment/:jobId/pay`
+	- Headers: `X-PAYMENT` (base64-encoded payment payload with EIP-712 signature).
+	- Response: HTTP 200 with `X-PAYMENT-RESPONSE` header containing `{ success, transactionHash?, error? }`.
+	- If manual confirmation required: returns status `AWAITING_CONFIRMATION`.
+
+- `POST /v1/x402/payment/:jobId/confirm`
+	- Response: `{ status, transactionHash?, message }`.
+	- Triggers final settlement on-chain if payment was awaiting confirmation.
+
+- `GET /v1/x402/payment/:jobId/status`
+	- Response: `{ jobId, orderId, status, amount, transactionHash?, createdAt, updatedAt }`.
+
+- `GET /v1/x402/order/:orderId/status`
+	- Response: Same as above, queried by orderId instead of jobId.
+
+- `GET /v1/x402/supported`
+	- Response: `{ networks: [{ chainId, name, rpcUrl, usdcAddress }] }`.
+
+- `GET /v1/x402/health`
+	- Response: `{ status, facilitatorAddress, usdcBalance, network }`.
+
+### 4.3 x402 Webhooks (Outbound)
+- URL: `${OPTUSBMS_BACKEND_URL}/webhook/x402/result`
+- Events:
+	1. `X402_PAYMENT_REQUIRED`: Payment job created, awaiting client payment.
+	2. `X402_PAYMENT_VERIFIED`: EIP-712 signature verified successfully.
+	3. `X402_PAYMENT_SETTLED`: On-chain transfer completed.
+	4. `X402_PAYMENT_CONFIRMED`: Manual confirmation received and settled.
+	5. `X402_PAYMENT_FAILED`: Payment processing failed.
+	6. `X402_PAYMENT_EXPIRED`: Payment timed out.
+- Payload structure: `{ type, jobId, orderId, data: { amount?, transactionHash?, error?, blockExplorerUrl? }, timestamp }`.
+
+### 4.4 Outbound (webhooks delivered by this service)
 - URL: `${OPTUSBMS_BACKEND_URL.replace(/\/$/, '')}/webhook/payments/result`
 - Payloads:
 	1. `QR_GENERATED`: `{ "type": "QR_GENERATED", "order_id": "...", "data": { "qr_image_base64": "..." } }`
@@ -111,11 +177,15 @@
 | `INTERNAL_API_KEY` | Shared secret required by `/set-2fa`. |
 | `2FACODE` | Optional seed token for `TwoFaStoreService`. Usually empty in production and supplied via API when needed. |
 | `CHROME_EXECUTABLE_PATH` | Optional manual override for Chromium binary in serverless environments. |
+| `X402_FACILITATOR_PRIVATE_KEY` | **Required for x402.** Private key of the facilitator wallet that executes `transferWithAuthorization`. Must have AVAX for gas. |
+| `X402_PAY_TO_ADDRESS` | **Required for x402.** Destination address for USDC payments. |
+| `X402_PAYMENT_TIMEOUT_MS` | Optional. Payment expiration time in milliseconds (default: 300000 = 5 minutes). |
 
 ## 6. Operational Notes
 - **Concurrency:** The in-memory queue guarantees sequential execution only within the same Node process. If you scale horizontally, ensure only one instance runs or introduce a distributed lock/queue.
 - **2FA Lifecycle:** When `LOGIN_2FA_REQUIRED` fires, upstream systems must call `/set-2fa` with the new token and then retry the blocked job.
 - **Error Logging:** Unexpected automation errors are logged via Nest's `Logger` but only 2FA blocks trigger webhooks.
 - **Local Testing:** Playwright downloads are saved under `tmp/qr-tests`, and Swagger docs are available at `/docs`. Run `npm run start:dev` for local dev or `vercel dev` for serverless parity.
-- **Crypto/USDT Automation:** Not implemented in this repository. The current codebase exclusively handles fiat (Ecofuturo) automation.
+- **x402 Payments:** The facilitator wallet must have sufficient AVAX on Fuji testnet for gas fees. Use the `/v1/x402/health` endpoint to check balance. Payments are processed sequentially via the job queue.
+- **Manual Confirmation:** When `requireManualConfirmation: true`, payments pause after verification until `/confirm` is called. This allows human review before on-chain settlement.
 

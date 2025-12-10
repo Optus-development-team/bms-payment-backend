@@ -7,6 +7,7 @@ import {
   Post,
   UnauthorizedException,
   Logger,
+  ConflictException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -16,11 +17,17 @@ import {
   ApiSecurity,
   ApiTags,
   ApiUnauthorizedResponse,
+  ApiConflictResponse,
 } from '@nestjs/swagger';
 import { FiatService } from './fiat.service';
 import { GenerateQrDto } from './dto/generate-qr.dto';
 import { VerifyPaymentDto } from './dto/verify-payment.dto';
 import { SetTwoFaDto } from './dto/set-2fa.dto';
+import {
+  GenerateHybridPaymentDto,
+  HybridPaymentResponseDto,
+  PaymentMethod,
+} from './dto/generate-hybrid-payment.dto';
 
 @ApiTags('Fiat Automation')
 @Controller('v1/fiat')
@@ -40,9 +47,20 @@ export class FiatController {
   @ApiAcceptedResponse({
     description: 'Job accepted for background processing.',
   })
+  @ApiConflictResponse({
+    description: 'QR already exists for this order or glosa.',
+  })
   generateQr(@Body() dto: GenerateQrDto) {
-    this.fiatService.queueGenerateQr(dto);
-    return { status: 'accepted' };
+    try {
+      this.fiatService.queueGenerateQr(dto);
+      return { status: 'accepted', orderId: dto.orderId, details: dto.details };
+    } catch (error) {
+      if (error instanceof ConflictException) {
+        throw error;
+      }
+      this.logger.error(`Failed to queue QR generation: ${error}`);
+      throw error;
+    }
   }
 
   @Post('verify-payment')
@@ -77,6 +95,30 @@ export class FiatController {
   ) {
     this.validateInternalApiKey(internalApiKey);
     return this.fiatService.updateTwoFactorCode(dto);
+  }
+
+  /**
+   * Generate hybrid payment (Fiat QR + X402 crypto)
+   * This endpoint creates both a fiat QR code and x402 payment requirements,
+   * allowing the user to choose their preferred payment method.
+   */
+  @Post('generate-hybrid-payment')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({
+    summary: 'Generate hybrid payment options (QR + X402 crypto)',
+    description:
+      'Creates both a fiat QR code and x402 cryptocurrency payment requirements. ' +
+      'The user can choose to pay via bank QR or crypto. ' +
+      'QR image arrives via webhook; x402 payment can be completed via /v1/x402/payment/:jobId/pay.',
+  })
+  @ApiAcceptedResponse({
+    description: 'Payment options created. QR will arrive via webhook.',
+    type: HybridPaymentResponseDto,
+  })
+  async generateHybridPayment(
+    @Body() dto: GenerateHybridPaymentDto,
+  ): Promise<HybridPaymentResponseDto> {
+    return this.fiatService.queueHybridPayment(dto);
   }
 
   private validateInternalApiKey(headerValue: string | undefined) {

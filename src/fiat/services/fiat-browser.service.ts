@@ -161,13 +161,28 @@ export class FiatBrowserService implements OnModuleDestroy {
       throw new Error('Browser context is not available.');
     }
 
-    this.page = await this.context.newPage();
+    try {
+      this.page = await this.context.newPage();
+    } catch (error) {
+      this.logger.warn(
+        `Recreando navegador por fallo al abrir página: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      this.resetBrowserState();
+      await this.ensureBrowser();
+      if (!this.context) {
+        throw new Error('Browser context is not available after relaunch.');
+      }
+      this.page = await this.context.newPage();
+    }
+
     this.page.setDefaultTimeout(45000);
     return this.page;
   }
 
   private async ensureBrowser(): Promise<void> {
-    if (this.browser && this.context) {
+    if (this.isBrowserActive()) {
       return;
     }
 
@@ -177,14 +192,69 @@ export class FiatBrowserService implements OnModuleDestroy {
     }
 
     this.initializing = (async () => {
-      this.logger.log('Launching new headless browser instance.');
-      const launchOptions = await this.buildLaunchOptions();
-      this.browser = await chromium.launch(launchOptions);
-      this.context = await this.browser.newContext();
+      try {
+        this.logger.log('Launching new headless browser instance.');
+        const launchOptions = await this.buildLaunchOptions();
+        this.browser = await chromium.launch(launchOptions);
+        this.context = await this.browser.newContext();
+      } catch (error) {
+        this.resetBrowserState();
+        const reason = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Failed to launch Chromium: ${reason}`);
+        throw new Error(
+          'No se pudo iniciar el navegador. Revisa las dependencias del sistema o define CHROME_EXECUTABLE_PATH.',
+        );
+      }
     })();
 
     await this.initializing;
     this.initializing = undefined;
+  }
+
+  private isBrowserActive(): boolean {
+    if (!this.browser || !this.context) {
+      return false;
+    }
+
+    return this.browser.isConnected();
+  }
+
+  private resetBrowserState(): void {
+    this.page = null;
+    this.context = null;
+    this.browser = null;
+  }
+
+  private async buildLaunchOptions(): Promise<LaunchOptions> {
+    // In serverless (Vercel/Lambda) use @sparticuz/chromium; locally rely on Playwright downloads.
+    if (!this.isServerlessEnvironment()) {
+      const localExecutable = await this.findLocalChromiumExecutable();
+      if (localExecutable) {
+        return {
+          headless: true,
+          executablePath: localExecutable,
+        } satisfies LaunchOptions;
+      }
+
+      return { headless: true } satisfies LaunchOptions;
+    }
+
+    const manualExecutable = process.env.CHROME_EXECUTABLE_PATH;
+    const executablePath =
+      manualExecutable ?? (await chromiumLambda.executablePath());
+
+    if (!executablePath) {
+      throw new Error(
+        'Chromium executable path is not available. Ensure @sparticuz/chromium is installed or set CHROME_EXECUTABLE_PATH.',
+      );
+    }
+
+    return {
+      args: chromiumLambda.args,
+      executablePath,
+      headless: true,
+      chromiumSandbox: false,
+    } satisfies LaunchOptions;
   }
 
   private isServerlessEnvironment(): boolean {
@@ -196,27 +266,72 @@ export class FiatBrowserService implements OnModuleDestroy {
     );
   }
 
-  private async buildLaunchOptions(): Promise<LaunchOptions> {
-    if (!this.isServerlessEnvironment()) {
-      return { headless: true };
+  private async findLocalChromiumExecutable(): Promise<string | null> {
+    const cacheDir = path.join(
+      process.env.HOME ?? process.cwd(),
+      '.cache',
+      'ms-playwright',
+    );
+    const candidates = await this.findLatestBrowserPath(cacheDir, [
+      {
+        folderPrefix: 'chromium_headless_shell-',
+        executable: path.join(
+          'chrome-headless-shell-linux64',
+          'chrome-headless-shell',
+        ),
+      },
+      {
+        folderPrefix: 'chromium-',
+        executable: path.join('chrome-linux', 'chrome'),
+      },
+    ]);
+
+    if (!candidates) {
+      return null;
     }
 
-    const manualExecutable = process.env.CHROME_EXECUTABLE_PATH;
-    const executablePath =
-      manualExecutable ?? (await chromiumLambda.executablePath());
+    return candidates;
+  }
 
-    if (!executablePath) {
-      throw new Error(
-        'Chromium executable path is not available in serverless mode.',
-      );
+  private async findLatestBrowserPath(
+    baseDir: string,
+    patterns: { folderPrefix: string; executable: string }[],
+  ): Promise<string | null> {
+    try {
+      const entries = await fs.readdir(baseDir, { withFileTypes: true });
+      const matches: { version: number; fullPath: string }[] = [];
+
+      for (const pattern of patterns) {
+        for (const entry of entries) {
+          if (
+            !entry.isDirectory() ||
+            !entry.name.startsWith(pattern.folderPrefix)
+          ) {
+            continue;
+          }
+
+          const versionStr = entry.name.slice(pattern.folderPrefix.length);
+          const version = Number.parseInt(versionStr, 10);
+          if (Number.isNaN(version)) {
+            continue;
+          }
+
+          matches.push({
+            version,
+            fullPath: path.join(baseDir, entry.name, pattern.executable),
+          });
+        }
+      }
+
+      if (!matches.length) {
+        return null;
+      }
+
+      matches.sort((a, b) => b.version - a.version);
+      return matches[0]?.fullPath ?? null;
+    } catch {
+      return null;
     }
-
-    return {
-      args: chromiumLambda.args,
-      executablePath,
-      headless: true,
-      chromiumSandbox: false,
-    } satisfies LaunchOptions;
   }
 
   private async runLoginFlow(page: Page): Promise<void> {

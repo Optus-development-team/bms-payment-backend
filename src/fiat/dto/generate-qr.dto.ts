@@ -1,5 +1,12 @@
 import { Transform } from 'class-transformer';
-import { IsNumber, IsPositive, IsString, MinLength } from 'class-validator';
+import {
+  IsNumber,
+  IsPositive,
+  IsString,
+  MinLength,
+  MaxLength,
+  Matches,
+} from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { isRecord, toNonEmptyString, toNumber } from './dto-helpers';
 
@@ -38,22 +45,35 @@ export class GenerateQrDto {
   amount!: number;
 
   @ApiProperty({
-    description: 'Glosa or memo text used later for verification',
-    example: 'BM QR #INV-1001',
+    description:
+      'Glosa or memo text (alphanumeric + hyphens/underscores only, no spaces)',
+    example: 'BM-QR-INV-1001',
   })
   @Transform(({ value, obj }) => {
-    const current = toNonEmptyString(value);
-    if (current) {
-      return current;
+    let current = toNonEmptyString(value);
+    if (!current && isRecord(obj)) {
+      current =
+        toNonEmptyString(obj['details']) ??
+        toNonEmptyString(obj['glosa']) ??
+        '';
     }
-    if (isRecord(obj)) {
-      return (
-        toNonEmptyString(obj['details']) ?? toNonEmptyString(obj['glosa']) ?? ''
-      );
-    }
-    return '';
+    // Normalize: remove spaces, special chars except hyphen/underscore
+    return (current || '')
+      .trim()
+      .replace(/\s+/g, '-') // spaces to hyphens
+      .replace(/[^a-zA-Z0-9_-]/g, '') // remove special chars
+      .toUpperCase();
   })
   @IsString()
-  @MinLength(1)
+  @MinLength(3, {
+    message: 'La glosa debe tener al menos 3 caracteres',
+  })
+  @MaxLength(50, {
+    message: 'La glosa no puede exceder 50 caracteres',
+  })
+  @Matches(/^[A-Z0-9_-]+$/, {
+    message:
+      'La glosa solo puede contener letras mayúsculas, números, guiones y guiones bajos',
+  })
   details!: string;
 }
