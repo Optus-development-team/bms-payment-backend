@@ -184,8 +184,8 @@ flowchart LR
 ---
   "createdAt": "2024-01-15T10:00:00Z",
   "updatedAt": "2024-01-15T10:01:00Z"
-}
-```
+
+
 
 ### GET /v1/x402/supported
 

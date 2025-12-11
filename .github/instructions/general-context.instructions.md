@@ -10,16 +10,17 @@
 ## 2. Application Modules
 
 ### 2.1 HTTP/API Layer
-- `AppModule` loads `ConfigModule.forRoot({ isGlobal: true })` plus `FiatModule` and `X402Module`.
-- `FiatController` exposes POST endpoints under `/v1/fiat`:
 	- `/generate-qr` and `/verify-payment` accept background jobs (202 Accepted responses) with DTOs that normalize snakeCase/camelCase payloads.
 	- `/generate-hybrid-payment` creates payment jobs supporting both fiat QR and x402 crypto payment methods.
 	- `/set-2fa` stores temporary 2FA tokens and requires the `x-internal-api-key` header to match `INTERNAL_API_KEY`.
-- `X402Controller` exposes endpoints under `/v1/x402`:
-	- `/payment` initiates payments (returns HTTP 402 with payment requirements).
-	- `/payment/:jobId/pay` processes payments with X-PAYMENT header.
-	- `/payment/:jobId/confirm` triggers manual confirmation flow.
-	- `/payment/:jobId/status` and `/order/:orderId/status` return payment status.
+	- `GET /pay` handles both QR (fiat) and crypto in a single flow: without `X-PAYMENT` returns HTTP 402 with available methods; with `X-PAYMENT` verifies/settles and emits `X-PAYMENT-RESPONSE`.
+	- `GET /pay/:orderId/status` returns the payment status for observability.
+	- `POST /pay/:orderId/confirm` (secured with `x-internal-api-key`) allows manual confirmation when crypto requires it.
+	- `/supported` lists supported networks and tokens.
+	- `/health` checks facilitator wallet balance.
+	- `GET /pay` handles both QR (fiat) and crypto in a single flow: without `X-PAYMENT` returns HTTP 402 with available methods; with `X-PAYMENT` verifies/settles and emits `X-PAYMENT-RESPONSE`.
+	- `GET /pay/:orderId/status` returns the payment status for observability.
+	- `POST /pay/:orderId/confirm` (secured with `x-internal-api-key`) allows manual confirmation when crypto requires it.
 	- `/supported` lists supported networks and tokens.
 	- `/health` checks facilitator wallet balance.
 - `SwaggerModule` documents every route and is reused both locally and on Vercel through `configureApp`.
@@ -41,17 +42,14 @@
 	- `X402PaymentService`: Manages payment lifecycle with in-memory job storage. Supports manual confirmation flow before final settlement.
 	- `X402WebhookService`: Sends payment events to `${OPTUSBMS_BACKEND_URL}/webhook/x402/result`.
 	- `X402JobQueueService`: Sequential job processing similar to fiat queue.
-- **Payment Flow:**
-	1. Client requests payment → Server returns HTTP 402 with `X-PAYMENT-REQUIRED` header (JSON payment requirements).
-	2. Client signs EIP-712 authorization and sends `X-PAYMENT` header (base64-encoded payload).
-	3. Facilitator verifies signature and optionally awaits manual confirmation.
-	4. Upon confirmation, facilitator executes `transferWithAuthorization` on-chain.
-	5. Server returns `X-PAYMENT-RESPONSE` header with transaction hash.
+	1. Client calls `GET /api/pay` without `X-PAYMENT` → server returns HTTP 402 body with crypto accept + fiat QR option **only if QR generation finishes within 30s**.
+	2. Client retries `GET /api/pay` with `X-PAYMENT` header (crypto payload or fiat payload).
+	3. Crypto path: facilitator verifies and settles EIP-712/EIP-3009, optionally awaiting manual confirmation.
+	4. Fiat path: Playwright verification checks glosa; only one payment method is honored per order.
+	5. Server returns `X-PAYMENT-RESPONSE` header describing settlement result.
 
 ### 2.4 Playwright Automation (`FiatBrowserService`)
-- Builds launch options dynamically:
-	- **Local:** `chromium.launch({ headless: true })`.
-	- **Serverless (Vercel/Lambda):** uses `@sparticuz/chromium` args/executable unless `CHROME_EXECUTABLE_PATH` overrides it. Sandbox disabled.
+- Always launches the bundled `@sparticuz/chromium` binary (even locally) to avoid OS-level dependencies; `CHROME_EXECUTABLE_PATH` can override the executable path when necessary. Sandbox disabled.
 - Maintains one `Browser`, `BrowserContext`, and `Page`. `ensurePage` lazily creates them and reuses across commands; `onModuleDestroy` closes the browser.
 - Navigation helpers (`navigate`, `logPageInfo`, `logElementState`, `clickIfVisible`) are heavily logged to aid troubleshooting when running remotely.
 - Saves downloaded QR PNGs to `QR_OUTPUT_DIR` (defaults to `tmp/qr-tests`). Files are persisted best-effort and independently of webhook delivery.
@@ -119,32 +117,14 @@
 	- Response: `{ "status": "updated", "message": "Retry the job now" }` (HTTP 200). The code is stored in-memory and consumed on the next login attempt.
 
 ### 4.2 x402 Payment API (Inbound)
-- `POST /v1/x402/payment`
-	- Body: `{ order_id, amount: number, description?, webhookUrl?, requireManualConfirmation?: boolean }`.
-	- Response: HTTP 402 with headers:
-		- `X-PAYMENT-REQUIRED`: JSON with `{ accepts, maxAmountRequired, resource, description, mimeType, payToAddress, jobId }`.
-	- The `accepts` array contains supported payment schemes (exact-evm).
+- `GET /api/pay`
+ 	- Query: `orderId`, `amountUsd`, optional `description`, `resource`, `fiatAmount`, `currency`, `symbol`, `requiresManualConfirmation`.
+ 	- No `X-PAYMENT` header → returns HTTP 402 JSON body `{ x402Version, resource, accepts, error, jobId }` with crypto option and fiat QR option **only if the QR is generated within 30s**.
+ 	- With `X-PAYMENT` header (base64 payload): processes crypto (EIP-712 exact) or fiat payloads; responds `200 OK` with `X-PAYMENT-RESPONSE` header containing `{ success, type, transaction, network?, payer?, currency?, errorReason }`.
+ 	- Only one payment method may be completed per order; attempting a different method returns 402.
 
-- `POST /v1/x402/payment/:jobId/pay`
-	- Headers: `X-PAYMENT` (base64-encoded payment payload with EIP-712 signature).
-	- Response: HTTP 200 with `X-PAYMENT-RESPONSE` header containing `{ success, transactionHash?, error? }`.
-	- If manual confirmation required: returns status `AWAITING_CONFIRMATION`.
-
-- `POST /v1/x402/payment/:jobId/confirm`
-	- Response: `{ status, transactionHash?, message }`.
-	- Triggers final settlement on-chain if payment was awaiting confirmation.
-
-- `GET /v1/x402/payment/:jobId/status`
-	- Response: `{ jobId, orderId, status, amount, transactionHash?, createdAt, updatedAt }`.
-
-- `GET /v1/x402/order/:orderId/status`
-	- Response: Same as above, queried by orderId instead of jobId.
-
-- `GET /v1/x402/supported`
-	- Response: `{ networks: [{ chainId, name, rpcUrl, usdcAddress }] }`.
-
-- `GET /v1/x402/health`
-	- Response: `{ status, facilitatorAddress, usdcBalance, network }`.
+- `GET /api/health`
+ 	- Response: `{ status, facilitatorAddress, usdcBalance, network }`.
 
 ### 4.3 x402 Webhooks (Outbound)
 - URL: `${OPTUSBMS_BACKEND_URL}/webhook/x402/result`
@@ -186,6 +166,6 @@
 - **2FA Lifecycle:** When `LOGIN_2FA_REQUIRED` fires, upstream systems must call `/set-2fa` with the new token and then retry the blocked job.
 - **Error Logging:** Unexpected automation errors are logged via Nest's `Logger` but only 2FA blocks trigger webhooks.
 - **Local Testing:** Playwright downloads are saved under `tmp/qr-tests`, and Swagger docs are available at `/docs`. Run `npm run start:dev` for local dev or `vercel dev` for serverless parity.
-- **x402 Payments:** The facilitator wallet must have sufficient AVAX on Fuji testnet for gas fees. Use the `/v1/x402/health` endpoint to check balance. Payments are processed sequentially via the job queue.
+- **x402 Payments:** The facilitator wallet must have sufficient AVAX on Fuji testnet for gas fees. Use the `/api/health` endpoint to check balance. Payments are processed sequentially via the job queue.
 - **Manual Confirmation:** When `requireManualConfirmation: true`, payments pause after verification until `/confirm` is called. This allows human review before on-chain settlement.
 

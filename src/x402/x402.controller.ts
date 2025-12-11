@@ -1,410 +1,133 @@
 import {
-  Body,
   Controller,
   Get,
   Headers,
-  HttpCode,
   HttpStatus,
   Logger,
-  Param,
-  Post,
+  Query,
   Res,
-  UnauthorizedException,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
 import {
   ApiTags,
   ApiOperation,
   ApiResponse,
   ApiHeader,
-  ApiBody,
-  ApiParam,
-  ApiSecurity,
+  ApiQuery,
 } from '@nestjs/swagger';
-import {
-  CreateX402PaymentDto,
-  ConfirmX402PaymentDto,
-  X402PaymentStatusResponseDto,
-} from './dto';
+import { PayRequestDto } from './dto/pay-request.dto';
 import { X402PaymentService } from './services/x402-payment.service';
 import { X402FacilitatorService } from './services/x402-facilitator.service';
+import { FiatAutomationService } from '../fiat/fiat-automation.service';
 import {
   X402_CONFIG,
-  PaymentRequiredResponse,
   encodeSettlementHeader,
+  decodePaymentHeader,
+  UnifiedAcceptOption,
+  SettlementResponse,
+  isFiatPaymentPayload,
+  PaymentRequirements,
+  FiatPaymentPayload,
 } from './types';
 
 /**
  * X402 Payment Controller
  *
- * Implements the HTTP 402 Payment Required flow:
- * - POST /v1/x402/payment - Create payment request (returns 402)
- * - POST /v1/x402/payment/:jobId/pay - Submit payment with X-PAYMENT header
- * - POST /v1/x402/payment/:jobId/confirm - Manual confirmation
- * - GET /v1/x402/payment/:jobId/status - Get payment status
+ * Unified QR + crypto payments through a single /pay entrypoint.
+ * - GET /api/pay           -> returns 402 with payment options when missing X-PAYMENT
+ * - GET /api/pay?X-PAYMENT -> processes crypto/fiat payments
  */
 @ApiTags('X402 Payments')
-@Controller('v1/x402')
+@Controller('api')
 export class X402Controller {
   private readonly logger = new Logger(X402Controller.name);
+  private readonly fiatTimeoutMs = 30_000;
 
   constructor(
     private readonly paymentService: X402PaymentService,
     private readonly facilitator: X402FacilitatorService,
-    private readonly configService: ConfigService,
+    private readonly fiatAutomation: FiatAutomationService,
   ) {}
 
-  /**
-   * Create a new payment request
-   * Returns HTTP 402 Payment Required with payment requirements
-   */
-  @Post('payment')
-  @HttpCode(HttpStatus.PAYMENT_REQUIRED)
+  @Get('pay')
   @ApiOperation({
-    summary: 'Create x402 payment request',
+    summary: 'Unified pay endpoint (QR + crypto)',
     description:
-      'Creates a new payment job and returns HTTP 402 with payment requirements. ' +
-      'The client should sign the payment and submit via /pay endpoint.',
+      'Without X-PAYMENT returns HTTP 402 with crypto + optional fiat QR options. ' +
+      'With X-PAYMENT, verifies and settles the chosen method.',
   })
-  @ApiBody({ type: CreateX402PaymentDto })
-  @ApiResponse({
-    status: 402,
-    description: 'Payment Required - Returns payment requirements',
-    schema: {
-      type: 'object',
-      properties: {
-        x402Version: { type: 'number', example: 1 },
-        accepts: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              scheme: { type: 'string', example: 'exact' },
-              network: { type: 'string', example: 'avalanche-fuji' },
-              maxAmountRequired: { type: 'string', example: '10500000' },
-              resource: { type: 'string', example: '/v1/x402/payment' },
-              description: { type: 'string' },
-              mimeType: { type: 'string', example: 'application/json' },
-              payTo: { type: 'string', example: '0x...' },
-              maxTimeoutSeconds: { type: 'number', example: 300 },
-              asset: {
-                type: 'string',
-                example: '0x5425890298aed601595a70AB815c96711a31Bc65',
-              },
-            },
-          },
-        },
-        jobId: { type: 'string', example: 'x402_abc123' },
-      },
-    },
+  @ApiHeader({
+    name: 'X-PAYMENT',
+    required: false,
+    description: 'Base64-encoded payment payload (crypto or fiat).',
   })
-  async createPayment(
-    @Body() dto: CreateX402PaymentDto,
+  @ApiQuery({
+    name: 'orderId',
+    required: true,
+    description: 'Business order identifier',
+  })
+  @ApiQuery({
+    name: 'amountUsd',
+    required: true,
+    description: 'Amount to charge in USD for crypto path',
+  })
+  async pay(
+    @Query() dto: PayRequestDto,
+    @Headers('x-payment') xPaymentHeader: string | undefined,
     @Res() res: Response,
   ): Promise<void> {
+    const resource = dto.resource ?? 'Product';
+    const description = dto.description ?? 'Payment';
+
     const { jobId, paymentRequirements } =
       await this.paymentService.createPaymentJob(
         dto.orderId,
         dto.amountUsd,
-        dto.description,
-        dto.resource,
+        description,
+        resource,
         dto.requiresManualConfirmation ?? true,
       );
 
-    const response: PaymentRequiredResponse & { jobId: string } = {
-      x402Version: X402_CONFIG.x402Version,
-      accepts: [paymentRequirements],
-      jobId,
-    };
-
-    res.status(HttpStatus.PAYMENT_REQUIRED).json(response);
-  }
-
-  /**
-   * Submit payment with X-PAYMENT header
-   */
-  @Post('payment/:jobId/pay')
-  @ApiOperation({
-    summary: 'Submit x402 payment',
-    description:
-      'Submit a signed payment payload via the X-PAYMENT header. ' +
-      'The payment will be verified and settled on the blockchain.',
-  })
-  @ApiParam({ name: 'jobId', description: 'Payment job ID' })
-  @ApiHeader({
-    name: 'X-PAYMENT',
-    description: 'Base64-encoded payment payload',
-    required: true,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Payment successful',
-    headers: {
-      'X-PAYMENT-RESPONSE': {
-        description: 'Base64-encoded settlement response',
-        schema: { type: 'string' },
-      },
-    },
-    schema: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean' },
-        status: { type: 'string' },
-        txHash: { type: 'string' },
-        blockExplorerUrl: { type: 'string' },
-        requiresManualConfirmation: { type: 'boolean' },
-      },
-    },
-  })
-  @ApiResponse({
-    status: 402,
-    description: 'Payment verification failed',
-  })
-  async submitPayment(
-    @Param('jobId') jobId: string,
-    @Headers('x-payment') xPaymentHeader: string | undefined,
-    @Res() res: Response,
-  ): Promise<void> {
     if (!xPaymentHeader) {
-      const job = this.paymentService.getJobStatus(jobId);
-      if (!job || !job.paymentRequirements) {
-        res.status(HttpStatus.NOT_FOUND).json({
-          error: 'Payment job not found',
-        });
-        return;
-      }
+      const accepts = await this.buildAccepts(
+        dto,
+        resource,
+        paymentRequirements,
+        jobId,
+      );
 
-      // Return 402 with payment requirements
       res.status(HttpStatus.PAYMENT_REQUIRED).json({
         x402Version: X402_CONFIG.x402Version,
-        accepts: [job.paymentRequirements],
+        resource,
+        accepts,
         error: 'X-PAYMENT header is required',
+        jobId,
       });
       return;
     }
 
-    const result = await this.paymentService.processPayment(
-      jobId,
+    const paymentPayload = decodePaymentHeader(xPaymentHeader);
+
+    if (isFiatPaymentPayload(paymentPayload)) {
+      await this.handleFiatPayment(
+        dto,
+        paymentPayload,
+        resource,
+        paymentRequirements,
+        jobId,
+        res,
+      );
+      return;
+    }
+
+    await this.handleCryptoPayment(
+      dto,
       xPaymentHeader,
-    );
-
-    if (!result.success && result.status === 'failed') {
-      const job = this.paymentService.getJobStatus(jobId);
-      res.status(HttpStatus.PAYMENT_REQUIRED).json({
-        x402Version: X402_CONFIG.x402Version,
-        accepts: job?.paymentRequirements ? [job.paymentRequirements] : [],
-        error: result.error,
-      });
-      return;
-    }
-
-    // Set X-PAYMENT-RESPONSE header if settlement was successful
-    if (result.txHash) {
-      const settlementHeader = encodeSettlementHeader({
-        success: true,
-        txHash: result.txHash,
-        networkId: X402_CONFIG.network,
-        chainId: X402_CONFIG.chainId,
-        payer: undefined, // Will be populated from settle response
-      });
-      res.setHeader('X-PAYMENT-RESPONSE', settlementHeader);
-    }
-
-    res.status(HttpStatus.OK).json({
-      success: result.success,
-      status: result.status,
-      txHash: result.txHash,
-      blockExplorerUrl: result.blockExplorerUrl,
-      requiresManualConfirmation: result.requiresManualConfirmation,
-    });
-  }
-
-  /**
-   * Manually confirm a settled payment
-   */
-  @Post('payment/:jobId/confirm')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: 'Manually confirm x402 payment',
-    description:
-      'Manually confirm a payment that has been settled on the blockchain. ' +
-      'This is used when requiresManualConfirmation is true.',
-  })
-  @ApiParam({ name: 'jobId', description: 'Payment job ID' })
-  @ApiSecurity('internal-api-key')
-  @ApiBody({ type: ConfirmX402PaymentDto })
-  @ApiResponse({
-    status: 200,
-    description: 'Payment confirmed',
-    schema: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean' },
-        status: { type: 'string' },
-      },
-    },
-  })
-  @ApiResponse({
-    status: 401,
-    description: 'Unauthorized - Invalid API key',
-  })
-  async confirmPayment(
-    @Param('jobId') jobId: string,
-    @Body() dto: ConfirmX402PaymentDto,
-    @Headers('x-internal-api-key') apiKey: string | undefined,
-  ): Promise<{ success: boolean; status: string; error?: string }> {
-    this.validateInternalApiKey(apiKey);
-
-    const result = await this.paymentService.confirmPayment(
+      paymentRequirements,
+      resource,
       jobId,
-      dto.confirmedBy,
+      res,
     );
-
-    return {
-      success: result.success,
-      status: result.status,
-      error: result.error,
-    };
-  }
-
-  /**
-   * Get payment job status
-   */
-  @Get('payment/:jobId/status')
-  @ApiOperation({
-    summary: 'Get x402 payment status',
-    description: 'Get the current status of a payment job.',
-  })
-  @ApiParam({ name: 'jobId', description: 'Payment job ID' })
-  @ApiResponse({
-    status: 200,
-    description: 'Payment status',
-    type: X402PaymentStatusResponseDto,
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Payment job not found',
-  })
-  getPaymentStatus(@Param('jobId') jobId: string, @Res() res: Response): void {
-    const job = this.paymentService.getJobStatus(jobId);
-
-    if (!job) {
-      res.status(HttpStatus.NOT_FOUND).json({
-        error: 'Payment job not found',
-      });
-      return;
-    }
-
-    const txHash = job.settleResponse?.transaction;
-
-    const response: X402PaymentStatusResponseDto = {
-      jobId: job.jobId,
-      orderId: job.orderId,
-      status: job.status,
-      amountUsd: job.amountUsd,
-      txHash,
-      blockExplorerUrl: txHash
-        ? this.facilitator.getBlockExplorerUrl(txHash)
-        : undefined,
-      payer: job.settleResponse?.payer,
-      requiresManualConfirmation: job.requiresManualConfirmation,
-      manuallyConfirmed: job.manuallyConfirmed,
-      confirmedAt: job.confirmedAt?.toISOString(),
-      createdAt: job.createdAt.toISOString(),
-      updatedAt: job.updatedAt.toISOString(),
-      errorMessage: job.errorMessage,
-    };
-
-    res.status(HttpStatus.OK).json(response);
-  }
-
-  /**
-   * Get payment by order ID
-   */
-  @Get('order/:orderId/status')
-  @ApiOperation({
-    summary: 'Get x402 payment status by order ID',
-    description: 'Get the payment status for a specific order.',
-  })
-  @ApiParam({ name: 'orderId', description: 'Order ID' })
-  @ApiResponse({
-    status: 200,
-    description: 'Payment status',
-    type: X402PaymentStatusResponseDto,
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Payment not found for order',
-  })
-  getPaymentByOrderId(
-    @Param('orderId') orderId: string,
-    @Res() res: Response,
-  ): void {
-    const job = this.paymentService.getJobByOrderId(orderId);
-
-    if (!job) {
-      res.status(HttpStatus.NOT_FOUND).json({
-        error: 'Payment not found for order',
-      });
-      return;
-    }
-
-    const txHash = job.settleResponse?.transaction;
-
-    const response: X402PaymentStatusResponseDto = {
-      jobId: job.jobId,
-      orderId: job.orderId,
-      status: job.status,
-      amountUsd: job.amountUsd,
-      txHash,
-      blockExplorerUrl: txHash
-        ? this.facilitator.getBlockExplorerUrl(txHash)
-        : undefined,
-      payer: job.settleResponse?.payer,
-      requiresManualConfirmation: job.requiresManualConfirmation,
-      manuallyConfirmed: job.manuallyConfirmed,
-      confirmedAt: job.confirmedAt?.toISOString(),
-      createdAt: job.createdAt.toISOString(),
-      updatedAt: job.updatedAt.toISOString(),
-      errorMessage: job.errorMessage,
-    };
-
-    res.status(HttpStatus.OK).json(response);
-  }
-
-  /**
-   * Get supported payment kinds
-   */
-  @Get('supported')
-  @ApiOperation({
-    summary: 'Get supported x402 payment kinds',
-    description: 'Returns the supported payment schemes and networks.',
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Supported payment kinds',
-    schema: {
-      type: 'object',
-      properties: {
-        kinds: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              x402Version: { type: 'number', example: 1 },
-              scheme: { type: 'string', example: 'exact' },
-              network: { type: 'string', example: 'avalanche-fuji' },
-            },
-          },
-        },
-      },
-    },
-  })
-  getSupported(): {
-    kinds: Array<{ x402Version: number; scheme: string; network: string }>;
-  } {
-    return this.facilitator.getSupported();
   }
 
   /**
@@ -445,19 +168,227 @@ export class X402Controller {
     };
   }
 
-  /**
-   * Validate internal API key
-   */
-  private validateInternalApiKey(headerValue: string | undefined): void {
-    const expectedKey = this.configService.get<string>('INTERNAL_API_KEY');
+  private buildCryptoAccept(
+    requirements: PaymentRequirements,
+    resource: string,
+  ): UnifiedAcceptOption {
+    return {
+      type: 'crypto',
+      scheme: requirements.scheme,
+      network: requirements.network,
+      amountRequired: requirements.maxAmountRequired,
+      AmountRequired: requirements.maxAmountRequired,
+      resource,
+      payTo: requirements.payTo,
+      asset: requirements.asset,
+      maxTimeoutSeconds: requirements.maxTimeoutSeconds,
+    };
+  }
 
-    if (!expectedKey) {
-      this.logger.error('INTERNAL_API_KEY not configured');
-      throw new UnauthorizedException('Internal API key not configured');
+  private async tryFiatAccept(
+    dto: PayRequestDto,
+  ): Promise<UnifiedAcceptOption | null> {
+    const fiatAmount = dto.fiatAmount ?? dto.amountUsd;
+    if (!fiatAmount || Number.isNaN(fiatAmount)) {
+      return null;
     }
 
-    if (headerValue !== expectedKey) {
-      throw new UnauthorizedException('Invalid internal API key');
+    try {
+      const qrBase64 = await this.fiatAutomation.generateQrWithTimeout(
+        fiatAmount,
+        dto.description ?? dto.orderId,
+        dto.orderId,
+        this.fiatTimeoutMs,
+      );
+
+      if (!qrBase64) {
+        return null;
+      }
+
+      return {
+        type: 'fiat',
+        currency: dto.currency ?? 'BOB',
+        symbol: dto.symbol ?? 'Bs.',
+        amountRequired: fiatAmount.toString(),
+        AmountRequired: fiatAmount.toString(),
+        base64QrSimple: qrBase64,
+        Base64QRSimple: qrBase64,
+        maxTimeoutSeconds: 60,
+        resource: dto.resource ?? 'Product',
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Fiat QR option skipped: ${message}`);
+      return null;
     }
   }
+
+  private async buildAccepts(
+    dto: PayRequestDto,
+    resource: string,
+    paymentRequirements: PaymentRequirements,
+    jobId: string,
+  ): Promise<UnifiedAcceptOption[]> {
+    const job = this.paymentService.getJobStatus(jobId);
+    const lockedMethod = job?.paymentMethod;
+
+    const accepts: UnifiedAcceptOption[] = [];
+
+    if (lockedMethod !== 'fiat') {
+      accepts.push(this.buildCryptoAccept(paymentRequirements, resource));
+    }
+
+    if (lockedMethod !== 'crypto') {
+      const fiatAccept = await this.tryFiatAccept(dto);
+      if (fiatAccept) {
+        accepts.push(fiatAccept);
+        if (job && fiatAccept.type === 'fiat') {
+          job.fiatQrBase64 = fiatAccept.base64QrSimple;
+          job.fiatAmount = Number(fiatAccept.amountRequired);
+        }
+      }
+    }
+
+    return accepts;
+  }
+
+  private async handleCryptoPayment(
+    dto: PayRequestDto,
+    xPaymentHeader: string,
+    paymentRequirements: PaymentRequirements,
+    resource: string,
+    jobId: string,
+    res: Response,
+  ): Promise<void> {
+    const result = await this.paymentService.processPayment(
+      jobId,
+      xPaymentHeader,
+    );
+
+    const settlement: SettlementResponse = {
+      success: result.success,
+      type: 'crypto',
+      transaction: result.txHash ?? null,
+      network: X402_CONFIG.network,
+      chainId: X402_CONFIG.chainId,
+      payer: result.payer,
+      errorReason: result.error ?? null,
+    };
+
+    res.setHeader('X-PAYMENT-RESPONSE', encodeSettlementHeader(settlement));
+
+    if (!result.success && result.status === 'failed') {
+      const accepts = await this.buildAccepts(
+        dto,
+        resource,
+        paymentRequirements,
+        jobId,
+      );
+
+      res.status(HttpStatus.PAYMENT_REQUIRED).json({
+        x402Version: X402_CONFIG.x402Version,
+        resource,
+        accepts,
+        error: settlement.errorReason ?? 'Payment failed',
+        jobId,
+      });
+      return;
+    }
+
+    res.status(HttpStatus.OK).json(settlement);
+  }
+
+  private async handleFiatPayment(
+    dto: PayRequestDto,
+    paymentPayload: FiatPaymentPayload,
+    resource: string,
+    paymentRequirements: PaymentRequirements,
+    jobId: string,
+    res: Response,
+  ): Promise<void> {
+    const job = this.paymentService.getJobStatus(jobId);
+
+    if (job?.paymentMethod && job.paymentMethod !== 'fiat') {
+      const settlement: SettlementResponse = {
+        success: false,
+        type: 'fiat',
+        transaction: null,
+        currency: paymentPayload.currency ?? dto.currency ?? 'BOB',
+        errorReason: 'Payment method already locked to crypto',
+      };
+
+      res.setHeader('X-PAYMENT-RESPONSE', encodeSettlementHeader(settlement));
+
+      const accepts = await this.buildAccepts(
+        dto,
+        resource,
+        job.paymentRequirements ?? paymentRequirements,
+        jobId,
+      );
+
+      res.status(HttpStatus.PAYMENT_REQUIRED).json({
+        x402Version: X402_CONFIG.x402Version,
+        resource,
+        accepts,
+        error: settlement.errorReason,
+        jobId,
+      });
+      return;
+    }
+
+    const details =
+      paymentPayload.payload.glosa || dto.description || dto.orderId;
+
+    const verified = await this.fiatAutomation.verifyPaymentInline(
+      {
+        orderId: dto.orderId,
+        details,
+      },
+      this.fiatTimeoutMs,
+    );
+
+    const settlement: SettlementResponse = {
+      success: verified,
+      type: 'fiat',
+      transaction:
+        paymentPayload.payload.transactionId || paymentPayload.payload.time ||
+        null,
+      currency: paymentPayload.currency ?? dto.currency ?? 'BOB',
+      errorReason: verified ? null : 'Fiat payment could not be verified',
+    };
+
+    res.setHeader('X-PAYMENT-RESPONSE', encodeSettlementHeader(settlement));
+
+    if (!verified) {
+      if (job) {
+        job.paymentMethod = 'fiat';
+        job.errorMessage = settlement.errorReason ?? undefined;
+      }
+
+      const accepts = await this.buildAccepts(
+        dto,
+        resource,
+        job?.paymentRequirements ?? paymentRequirements,
+        jobId,
+      );
+
+      res.status(HttpStatus.PAYMENT_REQUIRED).json({
+        x402Version: X402_CONFIG.x402Version,
+        resource,
+        accepts,
+        error: settlement.errorReason,
+        jobId,
+      });
+      return;
+    }
+
+    if (job) {
+      job.paymentMethod = 'fiat';
+      job.status = 'completed';
+      job.updatedAt = new Date();
+    }
+
+    res.status(HttpStatus.OK).json(settlement);
+  }
+
 }

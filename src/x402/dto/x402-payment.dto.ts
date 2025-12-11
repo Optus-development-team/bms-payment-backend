@@ -45,7 +45,7 @@ export class CreateX402PaymentDto {
 
   @ApiPropertyOptional({
     description: 'Resource URL being paid for',
-    example: '/v1/x402/payment',
+    example: '/api/pay',
   })
   @IsOptional()
   @IsString()

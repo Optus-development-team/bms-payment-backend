@@ -6,10 +6,8 @@ import { FiatAutomationService } from './fiat-automation.service';
 import { FiatBrowserService } from './services/fiat-browser.service';
 import { WebhookService } from './services/webhook.service';
 import { TwoFaStoreService } from './services/two-fa-store.service';
-import { X402Module } from '../x402/x402.module';
 
 @Module({
-  imports: [X402Module],
   controllers: [FiatController],
   providers: [
     FiatService,
@@ -19,5 +17,6 @@ import { X402Module } from '../x402/x402.module';
     WebhookService,
     TwoFaStoreService,
   ],
+  exports: [FiatAutomationService, JobQueueService],
 })
 export class FiatModule {}

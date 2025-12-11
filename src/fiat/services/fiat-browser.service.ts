@@ -37,6 +37,8 @@ export class FiatBrowserService implements OnModuleDestroy {
     modalAcceptButton: '#modalMensaje .modal-footer .btn.btn-primary',
     decisionModal: '#modalMensajeDecision',
     decisionModalAcceptButton: '#botonOpcionAceptada',
+    announcementModal: '#modalAnuncio',
+    announcementCloseIcon: '#modalAnuncio .fa.fa-close',
     qrOrigin: '#Cuenta_Origen',
     qrDestiny: '#Cuenta_Destino',
     simpleQrButton: 'a.dropdown-btn.menu:has-text("Simple QR")',
@@ -70,6 +72,7 @@ export class FiatBrowserService implements OnModuleDestroy {
 
   async generateQr(amount: number, details: string): Promise<string> {
     const page = await this.ensureSession();
+    await this.dismissAnnouncementModalIfPresent(page);
     await this.openGenerateQrPage(page);
     await this.logPageInfo(page, 'Generate QR');
     await this.logElementState(page, 'Cuenta_Origen', this.selectors.qrOrigin);
@@ -104,6 +107,7 @@ export class FiatBrowserService implements OnModuleDestroy {
 
   async verifyPayment(details: string): Promise<boolean> {
     const page = await this.ensureSession();
+    await this.dismissAnnouncementModalIfPresent(page);
     await this.navigate(page, this.indexUrl);
 
     const movementButton = page.locator(this.selectors.lastMovementButton);
@@ -143,11 +147,10 @@ export class FiatBrowserService implements OnModuleDestroy {
     const loginVisible = await this.isVisible(
       page.locator(this.selectors.loginLogo),
     );
-
+    await this.dismissAnnouncementModalIfPresent(page);
     if (loginVisible) {
       await this.runLoginFlow(page);
     }
-
     return page;
   }
 
@@ -202,7 +205,7 @@ export class FiatBrowserService implements OnModuleDestroy {
         const reason = error instanceof Error ? error.message : String(error);
         this.logger.error(`Failed to launch Chromium: ${reason}`);
         throw new Error(
-          'No se pudo iniciar el navegador. Revisa las dependencias del sistema o define CHROME_EXECUTABLE_PATH.',
+          'No se pudo iniciar el navegador. Instala @sparticuz/chromium como dependencia o define CHROME_EXECUTABLE_PATH.',
         );
       }
     })();
@@ -226,26 +229,18 @@ export class FiatBrowserService implements OnModuleDestroy {
   }
 
   private async buildLaunchOptions(): Promise<LaunchOptions> {
-    // In serverless (Vercel/Lambda) use @sparticuz/chromium; locally rely on Playwright downloads.
-    if (!this.isServerlessEnvironment()) {
-      const localExecutable = await this.findLocalChromiumExecutable();
-      if (localExecutable) {
-        return {
-          headless: true,
-          executablePath: localExecutable,
-        } satisfies LaunchOptions;
-      }
-
-      return { headless: true } satisfies LaunchOptions;
+    const manualExecutable = process.env.CHROME_EXECUTABLE_PATH;
+    if (manualExecutable) {
+      return {
+        headless: true,
+        executablePath: manualExecutable,
+      } satisfies LaunchOptions;
     }
 
-    const manualExecutable = process.env.CHROME_EXECUTABLE_PATH;
-    const executablePath =
-      manualExecutable ?? (await chromiumLambda.executablePath());
-
+    const executablePath = await chromiumLambda.executablePath();
     if (!executablePath) {
       throw new Error(
-        'Chromium executable path is not available. Ensure @sparticuz/chromium is installed or set CHROME_EXECUTABLE_PATH.',
+        'Chromium executable path is not available. Ensure @sparticuz/chromium is installed as a dependency or set CHROME_EXECUTABLE_PATH.',
       );
     }
 
@@ -255,83 +250,6 @@ export class FiatBrowserService implements OnModuleDestroy {
       headless: true,
       chromiumSandbox: false,
     } satisfies LaunchOptions;
-  }
-
-  private isServerlessEnvironment(): boolean {
-    return Boolean(
-      process.env.VERCEL ??
-        process.env.AWS_REGION ??
-        process.env.LAMBDA_TASK_ROOT ??
-        process.env.CHROME_EXECUTABLE_PATH,
-    );
-  }
-
-  private async findLocalChromiumExecutable(): Promise<string | null> {
-    const cacheDir = path.join(
-      process.env.HOME ?? process.cwd(),
-      '.cache',
-      'ms-playwright',
-    );
-    const candidates = await this.findLatestBrowserPath(cacheDir, [
-      {
-        folderPrefix: 'chromium_headless_shell-',
-        executable: path.join(
-          'chrome-headless-shell-linux64',
-          'chrome-headless-shell',
-        ),
-      },
-      {
-        folderPrefix: 'chromium-',
-        executable: path.join('chrome-linux', 'chrome'),
-      },
-    ]);
-
-    if (!candidates) {
-      return null;
-    }
-
-    return candidates;
-  }
-
-  private async findLatestBrowserPath(
-    baseDir: string,
-    patterns: { folderPrefix: string; executable: string }[],
-  ): Promise<string | null> {
-    try {
-      const entries = await fs.readdir(baseDir, { withFileTypes: true });
-      const matches: { version: number; fullPath: string }[] = [];
-
-      for (const pattern of patterns) {
-        for (const entry of entries) {
-          if (
-            !entry.isDirectory() ||
-            !entry.name.startsWith(pattern.folderPrefix)
-          ) {
-            continue;
-          }
-
-          const versionStr = entry.name.slice(pattern.folderPrefix.length);
-          const version = Number.parseInt(versionStr, 10);
-          if (Number.isNaN(version)) {
-            continue;
-          }
-
-          matches.push({
-            version,
-            fullPath: path.join(baseDir, entry.name, pattern.executable),
-          });
-        }
-      }
-
-      if (!matches.length) {
-        return null;
-      }
-
-      matches.sort((a, b) => b.version - a.version);
-      return matches[0]?.fullPath ?? null;
-    } catch {
-      return null;
-    }
   }
 
   private async runLoginFlow(page: Page): Promise<void> {
@@ -346,6 +264,7 @@ export class FiatBrowserService implements OnModuleDestroy {
 
     await this.handleTwoFactor(page);
     await this.dismissModalIfPresent(page);
+    await this.dismissAnnouncementModalIfPresent(page);
   }
 
   private async handleTwoFactor(page: Page): Promise<void> {
@@ -385,6 +304,43 @@ export class FiatBrowserService implements OnModuleDestroy {
     if (await this.isVisible(decisionModal, 1000)) {
       await page.locator(this.selectors.decisionModalAcceptButton).click();
       await page.waitForLoadState('networkidle');
+    }
+  }
+
+  private async dismissAnnouncementModalIfPresent(page: Page): Promise<void> {
+    const modal = page.locator(this.selectors.announcementModal);
+    const isAnnouncementVisible = await this.isVisible(modal, 1000);
+
+    if (!isAnnouncementVisible) {
+      return;
+    }
+
+    this.logger.debug('Closing announcement modal before continuing.');
+
+    try {
+      await page
+        .locator(this.selectors.announcementCloseIcon)
+        .click({ timeout: 5000 });
+    } catch (error) {
+      this.logger.warn(
+        `Failed to click announcement modal close icon: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return;
+    }
+
+    const hidden = await this.waitForHiddenAttribute(
+      page,
+      this.selectors.announcementModal,
+    );
+
+    if (!hidden) {
+      this.logger.warn(
+        'Announcement modal did not expose hidden="true" after closing attempt.',
+      );
+    } else {
+      this.logger.debug('Announcement modal hidden attribute confirmed.');
     }
   }
 
@@ -569,6 +525,31 @@ export class FiatBrowserService implements OnModuleDestroy {
     } catch (error) {
       this.logger.debug(
         `Unable to click ${description}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return false;
+    }
+  }
+
+  private async waitForHiddenAttribute(
+    page: Page,
+    selector: string,
+    timeout = 5000,
+  ): Promise<boolean> {
+    try {
+      await page.waitForFunction(
+        (targetSelector) => {
+          const element = document.querySelector(targetSelector);
+          return element?.getAttribute('hidden') === 'true';
+        },
+        selector,
+        { timeout },
+      );
+      return true;
+    } catch (error) {
+      this.logger.debug(
+        `hidden attribute check failed for ${selector}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

@@ -36,6 +36,8 @@ export const X402_CONFIG = {
  * PaymentRequirements - Specifies what payment is required for a resource
  * Returned in HTTP 402 response body
  */
+export type PaymentMethodType = 'crypto' | 'fiat';
+
 export interface PaymentRequirements {
   /** Scheme of the payment protocol (e.g., 'exact') */
   scheme: string;
@@ -62,6 +64,45 @@ export interface PaymentRequirements {
     name: string;
     version: string;
   } | null;
+  /** Payment method category */
+  type?: PaymentMethodType;
+}
+
+// ============== Payment Options for 402 Responses ==============
+
+export interface CryptoAcceptOption {
+  type: 'crypto';
+  scheme: string;
+  network: string;
+  amountRequired: string;
+  AmountRequired?: string;
+  resource: string;
+  payTo: string;
+  asset: string;
+  maxTimeoutSeconds: number;
+  baseCurrency?: string;
+}
+
+export interface FiatAcceptOption {
+  type: 'fiat';
+  currency: string;
+  symbol: string;
+  amountRequired: string;
+  AmountRequired?: string;
+  base64QrSimple?: string;
+  Base64QRSimple?: string;
+  maxTimeoutSeconds: number;
+  resource?: string;
+}
+
+export type UnifiedAcceptOption = CryptoAcceptOption | FiatAcceptOption;
+
+export interface UnifiedPaymentRequiredResponse {
+  x402Version: number;
+  resource: string;
+  accepts: UnifiedAcceptOption[];
+  error: string;
+  jobId?: string;
 }
 
 // ============== Payment Payload ==============
@@ -98,9 +139,11 @@ export interface ExactEvmPayload {
 /**
  * PaymentPayload - Sent in X-PAYMENT header (base64 encoded JSON)
  */
-export interface PaymentPayload {
+export interface CryptoPaymentPayload {
   /** x402 protocol version */
   x402Version: number;
+  /** Payment method */
+  type?: 'crypto';
   /** Payment scheme (e.g., 'exact') */
   scheme: string;
   /** Network identifier */
@@ -108,6 +151,23 @@ export interface PaymentPayload {
   /** Scheme-specific payload */
   payload: ExactEvmPayload;
 }
+
+export interface FiatPaymentPayload {
+  /** x402 protocol version */
+  x402Version: number;
+  /** Payment method */
+  type: 'fiat';
+  /** Currency identifier (e.g., BOB) */
+  currency: string;
+  /** Scheme-specific payload */
+  payload: {
+    glosa: string;
+    time?: string;
+    transactionId?: string;
+  };
+}
+
+export type PaymentPayload = CryptoPaymentPayload | FiatPaymentPayload;
 
 // ============== Verification ==============
 
@@ -144,17 +204,23 @@ export interface SettleResponse {
 /**
  * Settlement response header (X-PAYMENT-RESPONSE)
  */
-export interface SettlementResponseHeader {
+export interface SettlementResponse {
   /** Whether settlement was successful */
   success: boolean;
-  /** Transaction hash */
-  txHash?: string;
+  /** Payment method */
+  type: PaymentMethodType;
+  /** Transaction hash or bank reference */
+  transaction: string | null;
   /** Network ID */
-  networkId?: string;
+  network?: string;
   /** Chain ID */
   chainId?: number;
   /** Payer address */
   payer?: string;
+  /** Currency for fiat settlements */
+  currency?: string;
+  /** Error reason if settlement failed */
+  errorReason: string | null;
 }
 
 // ============== HTTP 402 Response ==============
@@ -230,6 +296,12 @@ export interface X402PaymentJob {
   confirmedAt?: Date;
   /** Confirmer identifier */
   confirmedBy?: string;
+  /** Selected payment method */
+  paymentMethod?: PaymentMethodType;
+  /** Fiat amount when QR is offered */
+  fiatAmount?: number;
+  /** Last generated QR (Base64) */
+  fiatQrBase64?: string;
 }
 
 // ============== Webhook Types ==============
@@ -337,11 +409,31 @@ export function decodePaymentHeader(encoded: string): PaymentPayload {
   return JSON.parse(decoded) as PaymentPayload;
 }
 
+export function isCryptoPaymentPayload(
+  payload: PaymentPayload,
+): payload is CryptoPaymentPayload {
+  return (payload as CryptoPaymentPayload).scheme !== undefined;
+}
+
+export function isFiatPaymentPayload(
+  payload: PaymentPayload,
+): payload is FiatPaymentPayload {
+  return payload.type === 'fiat';
+}
+
 /**
  * Encode settlement response for X-PAYMENT-RESPONSE header
  */
 export function encodeSettlementHeader(
-  response: SettlementResponseHeader,
+  response: SettlementResponse,
 ): string {
   return Buffer.from(JSON.stringify(response)).toString('base64');
+}
+
+/**
+ * Decode settlement response for downstream processing
+ */
+export function decodeSettlementHeader(encoded: string): SettlementResponse {
+  const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
+  return JSON.parse(decoded) as SettlementResponse;
 }

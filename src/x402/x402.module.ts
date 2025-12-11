@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { X402Controller } from './x402.controller';
 import {
   X402PaymentService,
@@ -6,6 +6,7 @@ import {
   X402WebhookService,
   X402JobQueueService,
 } from './services';
+import { FiatModule } from '../fiat/fiat.module';
 
 /**
  * X402 Payment Module
@@ -21,6 +22,7 @@ import {
  * - Sequential job queue for blockchain transactions
  */
 @Module({
+  imports: [forwardRef(() => FiatModule)],
   controllers: [X402Controller],
   providers: [
     X402PaymentService,

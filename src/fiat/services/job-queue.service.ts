@@ -52,6 +52,17 @@ export class JobQueueService {
     });
   }
 
+  /**
+   * Attempt to register a QR job; returns false if duplicate.
+   */
+  tryRegisterQrJob(orderId: string, details: string): boolean {
+    if (this.isDuplicate(orderId, details)) {
+      return false;
+    }
+    this.registerJob(orderId, details);
+    return true;
+  }
+
   enqueue<T>(task: () => Promise<T>): Promise<T> {
     const run = this.tail.then(() => task());
     this.tail = run.then(
@@ -69,7 +80,7 @@ export class JobQueueService {
     details: string,
     task: () => Promise<void>,
   ): Promise<void> {
-    if (this.isDuplicate(orderId, details)) {
+    if (!this.tryRegisterQrJob(orderId, details)) {
       this.logger.warn(
         `Duplicate QR job detected for orderId=${orderId} or details=${details}`,
       );
@@ -77,8 +88,6 @@ export class JobQueueService {
         `Ya existe un QR en proceso o generado para la orden "${orderId}" o glosa "${details}"`,
       );
     }
-
-    this.registerJob(orderId, details);
     this.logger.log(`QR job registered: orderId=${orderId}, details=${details}`);
 
     return this.enqueue(task);

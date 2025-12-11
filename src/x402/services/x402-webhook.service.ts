@@ -6,6 +6,7 @@ import {
   X402WebhookPayload,
   X402WebhookEventType,
   X402_CONFIG,
+  isCryptoPaymentPayload,
 } from '../types';
 
 /**
@@ -34,8 +35,13 @@ export class X402WebhookService {
    * Send webhook when payment is received
    */
   async sendPaymentReceived(job: X402PaymentJob): Promise<void> {
+    const payer =
+      job.paymentPayload &&
+      isCryptoPaymentPayload(job.paymentPayload) &&
+      job.paymentPayload.payload.authorization.from;
+
     await this.dispatch('X402_PAYMENT_RECEIVED', job, {
-      payer: job.paymentPayload?.payload?.authorization?.from,
+      payer,
     });
   }
 

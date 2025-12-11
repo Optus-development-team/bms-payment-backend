@@ -12,6 +12,7 @@ import {
   X402PaymentStatus,
   usdToAtomic,
   decodePaymentHeader,
+  isFiatPaymentPayload,
 } from '../types';
 import { X402FacilitatorService } from './x402-facilitator.service';
 import { X402WebhookService } from './x402-webhook.service';
@@ -104,9 +105,10 @@ export class X402PaymentService {
     const resourceUrl =
       resource ||
       this.configService.get<string>('X402_DEFAULT_RESOURCE') ||
-      '/v1/x402/payment';
+      '/api/pay';
 
     const paymentRequirements: PaymentRequirements = {
+      type: 'crypto',
       scheme: X402_CONFIG.scheme,
       network: X402_CONFIG.network,
       maxAmountRequired: amountAtomic,
@@ -170,6 +172,7 @@ export class X402PaymentService {
     blockExplorerUrl?: string;
     error?: string;
     requiresManualConfirmation?: boolean;
+    payer?: string;
   }> {
     const job = this.jobs.get(jobId);
     if (!job) {
@@ -204,6 +207,15 @@ export class X402PaymentService {
           ? this.facilitator.getBlockExplorerUrl(job.settleResponse.transaction)
           : undefined,
         requiresManualConfirmation: job.requiresManualConfirmation,
+        payer: job.settleResponse?.payer,
+      };
+    }
+
+    if (job.paymentMethod && job.paymentMethod !== 'crypto') {
+      return {
+        success: false,
+        status: 'failed',
+        error: 'Payment method already locked to fiat for this order',
       };
     }
 
@@ -225,7 +237,21 @@ export class X402PaymentService {
       };
     }
 
+    if (isFiatPaymentPayload(paymentPayload)) {
+      this.updateJobStatus(
+        jobId,
+        'failed',
+        'Fiat payload not supported on crypto processor',
+      );
+      return {
+        success: false,
+        status: 'failed',
+        error: 'Fiat payload not supported on crypto processor',
+      };
+    }
+
     job.paymentPayload = paymentPayload;
+    job.paymentMethod = 'crypto';
     this.updateJobStatus(jobId, 'payment_received');
 
     // Queue the verification and settlement job
@@ -248,6 +274,7 @@ export class X402PaymentService {
     blockExplorerUrl?: string;
     error?: string;
     requiresManualConfirmation?: boolean;
+    payer?: string;
   }> {
     const job = this.jobs.get(jobId);
     if (!job || !job.paymentRequirements) {
@@ -323,6 +350,7 @@ export class X402PaymentService {
         txHash: settleResult.transaction,
         blockExplorerUrl,
         requiresManualConfirmation: true,
+        payer: settleResult.payer,
       };
     }
 
@@ -336,6 +364,7 @@ export class X402PaymentService {
       txHash: settleResult.transaction,
       blockExplorerUrl,
       requiresManualConfirmation: false,
+      payer: settleResult.payer,
     };
   }
 

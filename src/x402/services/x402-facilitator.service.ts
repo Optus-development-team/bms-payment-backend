@@ -24,6 +24,7 @@ import {
   ExactEvmPayload,
   EIP712Domain,
   TransferWithAuthorizationTypes,
+  isCryptoPaymentPayload,
 } from '../types';
 
 /**
@@ -201,6 +202,13 @@ export class X402FacilitatorService implements OnModuleInit {
     paymentPayload: PaymentPayload,
     paymentRequirements: PaymentRequirements,
   ): Promise<VerifyResponse> {
+    if (!isCryptoPaymentPayload(paymentPayload)) {
+      return {
+        isValid: false,
+        invalidReason: 'fiat_not_supported_by_facilitator',
+      };
+    }
+
     if (!this.isConfigured) {
       return {
         isValid: false,
@@ -384,6 +392,15 @@ export class X402FacilitatorService implements OnModuleInit {
     paymentPayload: PaymentPayload,
     paymentRequirements: PaymentRequirements,
   ): Promise<SettleResponse> {
+    if (!isCryptoPaymentPayload(paymentPayload)) {
+      return {
+        success: false,
+        errorReason: 'fiat_not_supported_by_facilitator',
+        transaction: '',
+        network: X402_CONFIG.network,
+      };
+    }
+
     if (!this.isConfigured) {
       return {
         success: false,
