@@ -4,6 +4,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 export const configureApp = (app: INestApplication): void => {
   const allowedOrigins = [
     'https://unchopped-juliette-apostatically.ngrok-free.dev',
+    'https://optsms-backend.vercel.app',
   ];
   const localNetworkPattern =
     /^https?:\/\/(localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/;
