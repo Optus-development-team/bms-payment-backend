@@ -98,3 +98,7 @@ Settlement Response Structure (before base64 encoding) (for fiat)
 
 - analiza todo el proyecto y cersiorate que funcione en entornos serverless como vercel, esto es una prioridad y no puede quedar sin solucion/implementacion
 
+
+
+gcloud secrets create ECONET_URL --replication-policy="automatic"
+echo -n "https://econet.bancoecofuturo.com.bo:447/EconetWeb" | gcloud secrets versions add ECONET_USER --data-file=-
